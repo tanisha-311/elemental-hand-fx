@@ -61,7 +61,7 @@ Built using MediaPipe Hands and HTML5 Canvas, this project allows users to contr
 
 ## 🌐 Live Demo
 
-(Add your GitHub Pages link here)
+index1.html
 
 ---
 
