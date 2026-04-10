@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Elemental Hand FX — Enhanced</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+  canvas { position: absolute; top: 0; left: 0; transform: scaleX(-1); }
+  video { display: none; }
+
+  #hud {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 100;
+    pointer-events: none;
+    padding: 14px 20px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+  .hand-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 160px;
+  }
+  .hand-panel.right { align-items: flex-end; }
+  .hand-label {
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    opacity: 0.5;
+    color: #fff;
+  }
+  .meter-wrap {
+    width: 140px;
+    height: 6px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .meter-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.05s;
+    width: 0%;
+  }
+  .gesture-tag {
+    font-size: 10px;
+    letter-spacing: 1px;
+    opacity: 0;
+    color: #fff;
+    transition: opacity 0.3s;
+    text-transform: uppercase;
+  }
+  .gesture-tag.show { opacity: 0.8; }
+
+  #power-hud {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 100;
+    pointer-events: none;
+    text-align: center;
+  }
+  #power-name {
+    font-size: 11px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.25);
+  }
+
+  #key-hints {
+    position: fixed;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    pointer-events: none;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .key-btn {
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: rgba(255,255,255,0.35);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 4px;
+    padding: 3px 8px;
+    text-transform: uppercase;
+    transition: color 0.2s, border-color 0.2s;
+  }
+  .key-btn.active {
+    color: rgba(255,255,255,0.9);
+    border-color: rgba(255,255,255,0.6);
+  }
+
+  #combo-flash {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+    pointer-events: none;
+    opacity: 0;
+    background: white;
+    transition: opacity 0.05s;
+  }
+  #trail-canvas {
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: none;
+    transform: scaleX(-1);
+  }
+</style>
+</head>
+<body>
+
+<div id="combo-flash"></div>
+<video id="input_video"></video>
+<canvas id="trail_canvas"></canvas>
+<canvas id="output_canvas"></canvas>
+
+<div id="hud">
+  <div class="hand-panel left">
+    <div class="hand-label">Left Hand</div>
+    <div class="meter-wrap"><div class="meter-fill" id="lmeter"></div></div>
+    <div class="gesture-tag" id="lgest"></div>
+  </div>
+  <div id="power-hud">
+    <div id="power-name">Fire / Ice</div>
+  </div>
+  <div class="hand-panel right">
+    <div class="hand-label">Right Hand</div>
+    <div class="meter-wrap"><div class="meter-fill" id="rmeter"></div></div>
+    <div class="gesture-tag" id="rgest"></div>
+  </div>
+</div>
+
+<div id="key-hints">
+  <div class="key-btn active" id="kb1">1 Fire/Ice</div>
+  <div class="key-btn" id="kb2">2 Lightning</div>
+  <div class="key-btn" id="kb3">3 Red/Blue</div>
+  <div class="key-btn" id="kb4">4 Plasma</div>
+  <div class="key-btn" id="kb5">5 Dark Matter</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script>
+const video = document.getElementById('input_video');
+const canvas = document.getElementById('output_canvas');
+const ctx = canvas.getContext('2d');
+const trailCanvas = document.getElementById('trail_canvas');
+const trailCtx = trailCanvas.getContext('2d');
+const comboFlash = document.getElementById('combo-flash');
+
+const CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+let particles = [], lightningBolts = [], shockwaves = [], orbits = [];
+let currentPower = 'fire_ice';
+let handIntensities = [0, 0];
+let handSurges = [0, 0];
+let lastHandOpenState = [false, false];
+let lightningIntensity = 0;
+let startTime = Date.now();
+let lastFrameHands = [];
+let trailPoints = { left: [], right: [] };
+let screenShake = 0;
+let ambientPulse = 0;
+let comboFlashAlpha = 0;
+
+const POWERS = ['fire_ice','lightning','red_blue','plasma','dark_matter'];
+const POWER_NAMES = {
+  fire_ice: 'Fire / Ice',
+  lightning: 'Lightning',
+  red_blue: 'Force / Frost',
+  plasma: 'Plasma Vortex',
+  dark_matter: 'Dark Matter'
+};
+const POWER_COLORS_L = {
+  fire_ice: ['#ff4400','#ff8800','#ffcc00'],
+  lightning: ['#00cfff','#aaffff','#ffffff'],
+  red_blue: ['#ff2200','#ff6600','#ffaa00'],
+  plasma: ['#cc00ff','#ff00cc','#ff88ff'],
+  dark_matter: ['#4400aa','#220055','#8800ff']
+};
+const POWER_COLORS_R = {
+  fire_ice: ['#00ccff','#0044ff','#88ddff'],
+  lightning: ['#00cfff','#aaffff','#ffffff'],
+  red_blue: ['#0033ff','#0099ff','#88ccff'],
+  plasma: ['#00ffcc','#00ffaa','#88ffee'],
+  dark_matter: ['#ff00aa','#880055','#ff88cc']
+};
+
+function setActivePower(p) {
+  currentPower = p;
+  document.getElementById('power-name').textContent = POWER_NAMES[p];
+  POWERS.forEach((pw, i) => {
+    document.getElementById('kb' + (i + 1)).classList.toggle('active', pw === p);
+  });
+  trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === '1') setActivePower('fire_ice');
+  if (e.key === '2') setActivePower('lightning');
+  if (e.key === '3') setActivePower('red_blue');
+  if (e.key === '4') setActivePower('plasma');
+  if (e.key === '5') setActivePower('dark_matter');
+});
+
+// Pointing state tracking
+const pointingState = {
+  left: { frames: 0, active: false, lastWrist: null },
+  right: { frames: 0, active: false, lastWrist: null }
+};
+
+function isPinchingRaw(landmarks, state) {
+  const thumb = landmarks[4], index = landmarks[8], wrist = landmarks[0];
+  let vel = 0;
+  if (state.lastWrist) vel = Math.hypot(wrist.x - state.lastWrist.x, wrist.y - state.lastWrist.y);
+  state.lastWrist = { x: wrist.x, y: wrist.y };
+  if (vel > 0.05) return false;
+  const fingers = [12, 16, 20], pips = [10, 14, 18];
+  let openCount = 0;
+  for (let i = 0; i < 3; i++) {
+    const dTip = Math.hypot(landmarks[fingers[i]].x - wrist.x, landmarks[fingers[i]].y - wrist.y);
+    const dPip = Math.hypot(landmarks[pips[i]].x - wrist.x, landmarks[pips[i]].y - wrist.y);
+    if (dTip > dPip) openCount++;
+  }
+  if (openCount < 2) return false;
+  const pinchDist = Math.hypot(thumb.x - index.x, thumb.y - index.y);
+  const handSize = Math.hypot(landmarks[9].x - wrist.x, landmarks[9].y - wrist.y);
+  return pinchDist < handSize * 0.35;
+}
+function isPinching(landmarks, isRight) {
+  const state = isRight ? pointingState.right : pointingState.left;
+  const raw = isPinchingRaw(landmarks, state);
+  if (raw) { state.frames = 5; state.active = true; }
+  else { state.frames--; if (state.frames <= 0) state.active = false; }
+  return state.active;
+}
+function isHandOpen(landmarks) {
+  const wrist = landmarks[0];
+  const tips = [8, 12, 16, 20], pips = [6, 10, 14, 18];
+  let open = 0;
+  for (let i = 0; i < tips.length; i++) {
+    if (Math.hypot(landmarks[tips[i]].x - wrist.x, landmarks[tips[i]].y - wrist.y) >
+        Math.hypot(landmarks[pips[i]].x - wrist.x, landmarks[pips[i]].y - wrist.y)) open++;
+  }
+  return open >= 3;
+}
+function isFist(landmarks) {
+  const wrist = landmarks[0];
+  const tips = [8, 12, 16, 20], pips = [6, 10, 14, 18];
+  let closed = 0;
+  for (let i = 0; i < tips.length; i++) {
+    if (Math.hypot(landmarks[tips[i]].x - wrist.x, landmarks[tips[i]].y - wrist.y) <
+        Math.hypot(landmarks[pips[i]].x - wrist.x, landmarks[pips[i]].y - wrist.y)) closed++;
+  }
+  return closed >= 3;
+}
+
+// Spawn functions
+function spawnParticle(x, y, colors, surge = 0, isDrawing = false) {
+  const isIce = colors[0].includes('cc') || colors[0].includes('00c');
+  particles.push({
+    x: x + (Math.random() - 0.5) * (isDrawing ? 8 : 14),
+    y: y + (Math.random() - 0.5) * (isDrawing ? 8 : 14),
+    vx: isDrawing ? 0 : (Math.random() - 0.5) * 4,
+    vy: isDrawing ? 0 : (-(Math.random() * 8 + 2) - surge * 18),
+    life: 1.0,
+    decay: isDrawing ? 0.005 : 0.055,
+    size: isDrawing ? (Math.random() * 22 + 18) : (Math.random() * 20 + 6),
+    colors,
+    spin: (Math.random() - 0.5) * 0.2
+  });
+}
+
+function spawnLightning(x, y) {
+  if (Math.random() > lightningIntensity) return;
+  const bolt = [];
+  let cx = x, cy = y;
+  for (let i = 0; i < 25; i++) {
+    bolt.push({ x: cx, y: cy });
+    cx += (Math.random() - 0.5) * 80;
+    cy += (Math.random() - 0.8) * 80;
+  }
+  lightningBolts.push({ path: bolt, life: 1.0, color: Math.random() > 0.5 ? '#e0ffff' : '#00bfff' });
+}
+
+function spawnShockwave(x, y, power) {
+  const colors = {
+    fire_ice: ['255,100,0', '0,180,255'],
+    lightning: ['200,240,255', '200,240,255'],
+    red_blue: ['255,40,0', '0,80,255'],
+    plasma: ['200,0,255', '0,255,200'],
+    dark_matter: ['120,0,255', '255,0,120']
+  };
+  const col = colors[power] || ['255,255,255', '255,255,255'];
+  shockwaves.push({ x, y, r: 0, maxR: 350, life: 1.0, color: col[Math.floor(Math.random() * col.length)] });
+  screenShake = 18;
+  comboFlashAlpha = 0.7;
+}
+
+function spawnOrbit(cx, cy, colors) {
+  for (let i = 0; i < 8; i++) {
+    const angle = (i / 8) * Math.PI * 2;
+    orbits.push({
+      cx, cy, angle,
+      r: 60 + Math.random() * 40,
+      speed: 0.04 + Math.random() * 0.04,
+      life: 1.0,
+      decay: 0.008,
+      size: Math.random() * 10 + 4,
+      colors
+    });
+  }
+}
+
+// Detect two hands clapping
+let lastHandPositions = null;
+let clappedCooldown = 0;
+function checkClap(handsData) {
+  if (handsData.length < 2 || clappedCooldown > 0) return;
+  const h0 = handsData[0].landmarks[9];
+  const h1 = handsData[1].landmarks[9];
+  const dist = Math.hypot(h0.x - h1.x, h0.y - h1.y);
+  if (dist < 0.15) {
+    const mx = ((h0.x + h1.x) / 2) * canvas.width;
+    const my = ((h0.y + h1.y) / 2) * canvas.height;
+    spawnShockwave(mx, my, currentPower);
+    spawnOrbit(mx, my, POWER_COLORS_L[currentPower]);
+    clappedCooldown = 40;
+  }
+}
+
+function drawTrail(x, y, side, colors) {
+  const pts = trailPoints[side];
+  pts.push({ x, y });
+  if (pts.length > 80) pts.shift();
+  if (pts.length < 2) return;
+  trailCtx.save();
+  trailCtx.globalCompositeOperation = 'lighter';
+  for (let i = 1; i < pts.length; i++) {
+    const t = i / pts.length;
+    trailCtx.beginPath();
+    trailCtx.moveTo(pts[i - 1].x, pts[i - 1].y);
+    trailCtx.lineTo(pts[i].x, pts[i].y);
+    trailCtx.strokeStyle = colors[0];
+    trailCtx.lineWidth = t * 12;
+    trailCtx.globalAlpha = t * 0.18;
+    trailCtx.lineCap = 'round';
+    trailCtx.stroke();
+  }
+  trailCtx.restore();
+}
+
+function onResults(results) {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  trailCanvas.width = canvas.width;
+  trailCanvas.height = canvas.height;
+
+  // Screen shake offset
+  const shakeX = screenShake > 0 ? (Math.random() - 0.5) * screenShake : 0;
+  const shakeY = screenShake > 0 ? (Math.random() - 0.5) * screenShake : 0;
+  if (screenShake > 0) screenShake *= 0.82;
+
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+  ctx.clearRect(-10, -10, canvas.width + 20, canvas.height + 20);
+  ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+  // Dark vignette overlay
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.fillStyle = 'rgba(10,5,0,0.52)';
+  ctx.fillRect(-10, -10, canvas.width + 20, canvas.height + 20);
+  ctx.globalCompositeOperation = 'source-over';
+
+  if (clappedCooldown > 0) clappedCooldown--;
+
+  // Ambient breathing glow
+  ambientPulse = (Math.sin(Date.now() * 0.0015) * 0.5 + 0.5);
+
+  // Fade trail canvas
+  trailCtx.globalCompositeOperation = 'destination-out';
+  trailCtx.fillStyle = 'rgba(0,0,0,0.04)';
+  trailCtx.fillRect(0, 0, trailCanvas.width, trailCanvas.height);
+  trailCtx.globalCompositeOperation = 'source-over';
+
+  let handsData = [];
+
+  if (results.multiHandLandmarks) {
+    results.multiHandLandmarks.forEach((landmarks, idx) => {
+      handsData.push({ landmarks, label: results.multiHandedness[idx].label });
+    });
+
+    checkClap(handsData);
+
+    // Lightning power global
+    let anyOpen = handsData.some(h => isHandOpen(h.landmarks));
+    if (currentPower === 'lightning') {
+      lightningIntensity += anyOpen ? 0.08 : -0.05;
+    } else {
+      lightningIntensity -= 0.1;
+    }
+    lightningIntensity = Math.max(0, Math.min(1, lightningIntensity));
+
+    if (lightningIntensity > 0.01 && Math.random() < 0.4 * lightningIntensity) {
+      ctx.fillStyle = `rgba(200,220,255,${0.2 * lightningIntensity})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      handsData.forEach(h => {
+        if (!isHandOpen(h.landmarks)) return;
+        [4, 8, 12, 16, 20].forEach(ti => {
+          if (Math.random() < 0.07) spawnLightning(h.landmarks[ti].x * canvas.width, h.landmarks[ti].y * canvas.height);
+        });
+      });
+    }
+
+    handsData.forEach(({ landmarks, label }) => {
+      const isRight = label === 'Right';
+      const side = isRight ? 1 : 0;
+      const sideName = isRight ? 'right' : 'left';
+      const colors = isRight ? POWER_COLORS_R[currentPower] : POWER_COLORS_L[currentPower];
+
+      const open = isHandOpen(landmarks);
+      const pinch = isPinching(landmarks, isRight);
+      const fist = isFist(landmarks);
+
+      // Update gesture display
+      const gestEl = document.getElementById(isRight ? 'rgest' : 'lgest');
+      if (pinch) { gestEl.textContent = 'Pinch Draw'; gestEl.classList.add('show'); }
+      else if (open) { gestEl.textContent = 'Open Palm'; gestEl.classList.add('show'); }
+      else if (fist) { gestEl.textContent = 'Fist Surge'; gestEl.classList.add('show'); }
+      else { gestEl.classList.remove('show'); }
+
+      // Intensity
+      if (currentPower !== 'lightning') {
+        handIntensities[side] += (open || pinch) ? 0.05 : fist ? 0.03 : -0.15;
+        if (open && !lastHandOpenState[side]) handSurges[side] = 1.0;
+      } else {
+        handIntensities[side] -= 0.1;
+      }
+      lastHandOpenState[side] = open;
+      handSurges[side] *= 0.92;
+      if (handSurges[side] < 0.01) handSurges[side] = 0;
+      handIntensities[side] = Math.max(0, Math.min(1, handIntensities[side]));
+
+      const intensity = handIntensities[side];
+
+      // HUD meter update
+      const meter = document.getElementById(isRight ? 'rmeter' : 'lmeter');
+      meter.style.width = (intensity * 100) + '%';
+      meter.style.background = colors[0];
+      meter.style.boxShadow = intensity > 0.5 ? `0 0 8px ${colors[0]}` : 'none';
+
+      if (intensity <= 0.01) return;
+
+      const palm = landmarks[9];
+      const lx = palm.x * canvas.width;
+      const ly = palm.y * canvas.height;
+
+      // Pinch trail drawing
+      if (pinch) {
+        const idx8 = landmarks[8], idx4 = landmarks[4];
+        const tx = ((idx8.x + idx4.x) / 2) * canvas.width;
+        const ty = ((idx8.y + idx4.y) / 2) * canvas.height;
+        drawTrail(tx, ty, sideName, colors);
+        for (let k = 0; k < 2; k++) spawnParticle(tx, ty, colors, 0, true);
+      } else {
+        trailPoints[sideName] = [];
+      }
+
+      // Glow under hand
+      const glowR = (500 + Math.sin(Date.now() * 0.015) * 30) * intensity;
+      const glow = ctx.createRadialGradient(lx, ly, 0, lx, ly, glowR);
+      glow.addColorStop(0, hexToRgba(colors[0], 0.4 * intensity));
+      glow.addColorStop(0.5, hexToRgba(colors[1], 0.12 * intensity));
+      glow.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.globalCompositeOperation = 'screen';
+      ctx.fillStyle = glow;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Plasma vortex orbiting rings
+      if (currentPower === 'plasma' && open) {
+        const t = Date.now() * 0.002;
+        for (let ring = 0; ring < 2; ring++) {
+          const rr = 80 + ring * 50;
+          ctx.beginPath();
+          ctx.arc(lx, ly, rr, 0, Math.PI * 2);
+          ctx.strokeStyle = colors[ring % colors.length];
+          ctx.lineWidth = 1.5;
+          ctx.globalAlpha = 0.25 * intensity;
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+        // Spinning plasma orbs
+        for (let oi = 0; oi < 4; oi++) {
+          const angle = t * (oi % 2 === 0 ? 1 : -1.3) + (oi / 4) * Math.PI * 2;
+          const or = 80 + (oi % 2) * 50;
+          const ox = lx + Math.cos(angle) * or;
+          const oy = ly + Math.sin(angle) * or;
+          spawnParticle(ox, oy, colors, 0, false);
+        }
+      }
+
+      // Dark matter: warp ripple + void particles
+      if (currentPower === 'dark_matter') {
+        const t = Date.now() * 0.001;
+        for (let ri = 0; ri < 3; ri++) {
+          const rr = (60 + ri * 45 + Math.sin(t + ri) * 10) * intensity;
+          ctx.beginPath();
+          ctx.arc(lx, ly, rr, 0, Math.PI * 2);
+          ctx.strokeStyle = colors[ri % colors.length];
+          ctx.lineWidth = 1;
+          ctx.globalAlpha = 0.2 * intensity;
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+        // Sucking inward particles (reverse vy)
+        landmarks.forEach(pt => {
+          if (Math.random() < intensity * 0.3) {
+            const px = pt.x * canvas.width;
+            const py = pt.y * canvas.height;
+            particles.push({
+              x: px + (Math.random() - 0.5) * 80,
+              y: py + (Math.random() - 0.5) * 80,
+              vx: (lx - px) * 0.04,
+              vy: (ly - py) * 0.04,
+              life: 1.0, decay: 0.04, size: Math.random() * 10 + 3, colors
+            });
+          }
+        });
+      }
+
+      ctx.globalCompositeOperation = 'source-over';
+
+      // Particle spawning per landmark
+      if (currentPower !== 'dark_matter') {
+        landmarks.forEach(pt => spawnParticle(pt.x * canvas.width, pt.y * canvas.height, colors, handSurges[side]));
+        CONNECTIONS.forEach(([s, e]) => {
+          const mid = {
+            x: ((landmarks[s].x + landmarks[e].x) / 2) * canvas.width,
+            y: ((landmarks[s].y + landmarks[e].y) / 2) * canvas.height
+          };
+          spawnParticle(mid.x, mid.y, colors, handSurges[side]);
+        });
+      }
+
+      // Fist surge: burst of particles
+      if (fist && Math.random() < 0.3) {
+        for (let b = 0; b < 6; b++) {
+          const angle = Math.random() * Math.PI * 2;
+          particles.push({
+            x: lx, y: ly,
+            vx: Math.cos(angle) * (Math.random() * 8 + 3),
+            vy: Math.sin(angle) * (Math.random() * 8 + 3),
+            life: 1.0, decay: 0.04, size: Math.random() * 16 + 8, colors
+          });
+        }
+      }
+    });
+  }
+
+  // Draw trail canvas on top
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.drawImage(trailCanvas, 0, 0);
+  ctx.restore();
+
+  // Draw particles
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= p.decay || 0.055;
+    if (p.type !== 'dark_matter') p.vy -= 0.12;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    const colors = p.colors || ['#ff8800', '#ff4400', '#ffcc00'];
+    const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
+    grad.addColorStop(0, hexToRgba(colors[2] || '#ffffff', p.life));
+    grad.addColorStop(0.3, hexToRgba(colors[0], p.life * 0.8));
+    grad.addColorStop(0.7, hexToRgba(colors[1], p.life * 0.3));
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Draw lightning
+  for (let i = lightningBolts.length - 1; i >= 0; i--) {
+    const b = lightningBolts[i];
+    b.life -= 0.1;
+    if (b.life <= 0) { lightningBolts.splice(i, 1); continue; }
+    ctx.beginPath();
+    ctx.moveTo(b.path[0].x, b.path[0].y);
+    for (let j = 1; j < b.path.length; j++) ctx.lineTo(b.path[j].x, b.path[j].y);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = b.color; ctx.lineWidth = 18; ctx.globalAlpha = b.life * 0.25; ctx.shadowBlur = 30; ctx.shadowColor = b.color; ctx.stroke();
+    ctx.lineWidth = 7; ctx.globalAlpha = b.life * 0.55; ctx.stroke();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.globalAlpha = b.life; ctx.stroke();
+    ctx.restore();
+  }
+
+  // Draw shockwaves
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = shockwaves.length - 1; i >= 0; i--) {
+    const s = shockwaves[i];
+    s.r += 18;
+    s.life -= 0.04;
+    if (s.life <= 0 || s.r > s.maxR) { shockwaves.splice(i, 1); continue; }
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${s.color},${s.life * 0.9})`;
+    ctx.lineWidth = 4 * s.life;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r * 0.7, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${s.color},${s.life * 0.4})`;
+    ctx.lineWidth = 2 * s.life;
+    ctx.stroke();
+  }
+
+  // Draw orbit particles
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = orbits.length - 1; i >= 0; i--) {
+    const o = orbits[i];
+    o.angle += o.speed;
+    o.life -= o.decay;
+    if (o.life <= 0) { orbits.splice(i, 1); continue; }
+    const ox = o.cx + Math.cos(o.angle) * o.r;
+    const oy = o.cy + Math.sin(o.angle) * o.r;
+    const grad = ctx.createRadialGradient(ox, oy, 0, ox, oy, o.size * 2);
+    grad.addColorStop(0, hexToRgba(o.colors[0], o.life));
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(ox, oy, o.size * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  // Combo flash
+  if (comboFlashAlpha > 0) {
+    comboFlash.style.opacity = comboFlashAlpha;
+    comboFlashAlpha *= 0.82;
+    if (comboFlashAlpha < 0.01) { comboFlash.style.opacity = 0; comboFlashAlpha = 0; }
+  }
+}
+
+function hexToRgba(hex, alpha) {
+  if (!hex || hex[0] !== '#') return `rgba(255,255,255,${alpha})`;
+  let r = parseInt(hex.slice(1, 3), 16);
+  let g = parseInt(hex.slice(3, 5), 16);
+  let b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+const hands = new Hands({
+  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+});
+hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.65, minTrackingConfidence: 0.65 });
+hands.onResults(onResults);
+
+const camera = new Camera(video, {
+  onFrame: async () => { await hands.send({ image: video }); },
+  width: 1280, height: 720
+});
+camera.start();
+</script>
+</body>
+</html>
