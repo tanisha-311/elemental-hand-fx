@@ -83,4 +83,4 @@ index1.html
 
 ## 👩‍💻 Author
 
-Your Name
+TANISHA TOMAR
